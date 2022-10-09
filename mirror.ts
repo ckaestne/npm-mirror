@@ -53,7 +53,7 @@ changes.on('data', async function (change: any) {
     await writeDeletion(new Date(), change.id)
   } else {
     await writeUpdate(new Date(), change.id, JSON.stringify(change.doc))
-    // await downloadLatestPkg(change.id, change.doc)
+    await downloadLatestPkg(change.id, change.doc)
   }
 
   // keeping last processed id

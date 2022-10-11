@@ -8,6 +8,7 @@ import Queue from 'better-queue'
 import { Counter, Gauge, collectDefaultMetrics, register } from 'prom-client'
 import express from 'express';
 import https from 'https';
+import bent from 'bent'
 
 
 
@@ -25,6 +26,8 @@ console.log(`Tracking changes to ${config.couchdb} from ${config.update_seq}`)
 // metrics / monitoring
 let npmUpdateCounter = new Counter({ name: "npmmirror_npm_update_counter", help: "number of npm updates processed" })
 let downloadQueueLength = new Gauge({ name: "npmmirror_download_queue_length", help: "length of the download queue" })
+let lastSeq = new Gauge({ name: "npmmirror_last_seq_processed", help: "value of the last seq processed" })
+let newestSeq = new Gauge({ name: "npmmirror_newest_seq", help: "value of the newest seq on the server" })
 collectDefaultMetrics({ prefix: "npmmirror_" })
 let app = express()
 app.get('/metrics', async (req, res) => {
@@ -49,13 +52,14 @@ let changeProcessor = new Writable({
   objectMode: true,
   write: async function(change, ignore, cb) {
     npmUpdateCounter.inc()
+    if (change && change.seq) lastSeq.set(change.seq)
 
     normalize(change)
     var promise
     if (change.deleted) {
       await writeDeletion(new Date(), change.id)
     } else {
-      await writeUpdate(new Date(), change.id, JSON.stringify(change.doc))
+      await writeUpdate(new Date(), change.id, JSON.stringify(change.doc), change.seq)
       downloadLatestPkg(change.id, change.doc)
     }
   
@@ -79,8 +83,8 @@ function pkgDir(pkgId: string) {
   return path.join(config.targetDir, pkgId)
 }
 
-async function writeUpdate(time: Date, pkgId: string, json: string) {
-  console.log(`updated ${pkgId}`)
+async function writeUpdate(time: Date, pkgId: string, json: string, seq: number) {
+  console.log(`updated ${pkgId} (${seq})`)
 
   const d = pkgDir(pkgId)
   await mkdir(d, { recursive: true })
@@ -155,3 +159,17 @@ let downloadQueue: any = new Queue(processDownload, {
   on('task_finish', () => { downloadQueueLength.set(downloadQueue.length) }).
   on('task_failed', () => { downloadQueueLength.set(downloadQueue.length) })
 
+
+//once ever 5 min check the newest seq number of the database to see how far we are behind
+const getJSON = bent('json')
+async function checkNewestSeq() {
+  try {
+    const r = await getJSON(config.couchdb)
+    if (r && r.update_seq) {
+      console.log("---- latest seq: "+r.update_seq)
+      newestSeq.set(r.update_seq)
+    }
+  } catch (e) {}
+  setTimeout(checkNewestSeq, 1000)
+}
+checkNewestSeq()

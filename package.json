@@ -6,6 +6,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "bent": "^7.3.12",
     "better-queue": "^3.8.12",
     "changes-stream": "git://github.com/jcrugzz/changes-stream.git#3be91e4b9aff2b54a0f891e54c9e0cb29b2a221f",
     "express": "^4.18.1",

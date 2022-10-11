@@ -1,12 +1,13 @@
 import ChangesStream from 'changes-stream';
-import { writeFile, mkdir, access } from 'node:fs/promises';
+import { writeFile, mkdir, access, unlink } from 'node:fs/promises';
 import { createWriteStream, writeFileSync, readFileSync } from 'node:fs';
+import { Writable } from 'node:stream';
 import * as path from 'path';
 import normalize from 'normalize-registry-metadata'
-import request from 'request'
 import Queue from 'better-queue'
 import { Counter, Gauge, collectDefaultMetrics, register } from 'prom-client'
 import express from 'express';
+import https from 'https';
 
 
 
@@ -44,21 +45,27 @@ var changes = new ChangesStream({
   since: config.update_seq
 });
 
-// processing changes
-changes.on('data', async function (change: any) {
-  npmUpdateCounter.inc()
+let changeProcessor = new Writable({
+  objectMode: true,
+  write: async function(change, ignore, cb) {
+    npmUpdateCounter.inc()
 
-  normalize(change)
-  if (change.deleted) {
-    await writeDeletion(new Date(), change.id)
-  } else {
-    await writeUpdate(new Date(), change.id, JSON.stringify(change.doc))
-    await downloadLatestPkg(change.id, change.doc)
+    normalize(change)
+    var promise
+    if (change.deleted) {
+      await writeDeletion(new Date(), change.id)
+    } else {
+      await writeUpdate(new Date(), change.id, JSON.stringify(change.doc))
+      downloadLatestPkg(change.id, change.doc)
+    }
+  
+    // keeping last processed id
+    await writeFile(config.update_seq_store, `{"update_seq":${change.seq}}`)
+    cb()
   }
+})
+changes.pipe(changeProcessor)
 
-  // keeping last processed id
-  writeFileSync(config.update_seq_store, `{"update_seq":${change.seq}}`)
-});
 
 changes.on('error', function (e) {
   console.log(e);
@@ -79,7 +86,7 @@ async function writeUpdate(time: Date, pkgId: string, json: string) {
   await mkdir(d, { recursive: true })
 
   const p = path.join(d, time.toISOString() + ".json")
-  await writeFile(p, json)
+  return writeFile(p, json)
 }
 
 async function writeDeletion(time: Date, pkgId: string) {
@@ -88,7 +95,7 @@ async function writeDeletion(time: Date, pkgId: string) {
   const d = pkgDir(pkgId)
   await mkdir(d, { recursive: true })
   const p = path.join(d, time.toISOString() + "-DELETED.json")
-  await writeFile(p, "")
+  return writeFile(p, "")
 }
 
 async function downloadLatestPkg(pkgId: string, doc: any) {
@@ -121,23 +128,28 @@ async function downloadLatestPkg(pkgId: string, doc: any) {
   })
 }
 
-
 function processDownload(input: [string, string], cb) {
   let [p, tar] = input
   console.log(`downloading ${tar}`)
   let file = createWriteStream(p);
-  request(tar).
-    pipe(file).
-    on('finish', () => { console.log(`downloading ${tar} finished`); cb(null, p) }).
-    on('error', (e) => { console.log(`downloading ${tar} failed ${e}`); cb(e, null) })
+  const request = https.get(tar, function(response) {
+           response.pipe(file);
+           file.on("finish", () => {
+              file.close();
+              console.log(`downloading ${tar} finished`);
+              cb(null, p)
+            });
+  }).on('error', (e) => { console.log(`downloading ${tar} failed ${e}`);unlink(p); cb(e, null) })
 }
 
+
 let downloadQueue: any = new Queue(processDownload, {
-  concurrent: 1, maxRetries: 1, store: {
-    type: 'sql',
-    dialect: 'sqlite',
-    path: config.download_queue_store
-  }
+   concurrent: 5, maxRetries: 1,
+  // store: {
+  //   type: 'sql',
+  //   dialect: 'sqlite',
+  //   path: config.download_queue_store
+  // }
 }).
   on('task_queued', () => { downloadQueueLength.set(downloadQueue.length) }).
   on('task_finish', () => { downloadQueueLength.set(downloadQueue.length) }).
